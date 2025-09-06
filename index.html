@@ -1,335 +1,366 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { initializeApp } from 'firebase/app';
-import { getAuth, signInWithCustomToken, onAuthStateChanged, signOut } from 'firebase/auth';
-import { getFirestore, collection, onSnapshot, doc, setDoc, addDoc, serverTimestamp, query, orderBy, getDocs } from 'firebase/firestore';
-
-// Main App Component
-const App = () => {
-  // Use state to manage the current view, user data, and UI elements.
-  const [db, setDb] = useState(null);
-  const [auth, setAuth] = useState(null);
-  const [user, setUser] = useState(null);
-  const [isAuthReady, setIsAuthReady] = useState(false);
-  const [contacts, setContacts] = useState([]);
-  const [currentChat, setCurrentChat] = useState(null);
-  const [messages, setMessages] = useState([]);
-  const [messageText, setMessageText] = useState('');
-  const [profile, setProfile] = useState({ displayName: '', photoURL: '' });
-  const [isEditingProfile, setIsEditingProfile] = useState(false);
-  const [loginState, setLoginState] = useState('phone'); // 'phone', 'otp', 'verified'
-
-  // Ref for auto-scrolling to the bottom of the chat
-  const messagesEndRef = useRef(null);
-
-  // Initialize Firebase and set up authentication listener.
-  useEffect(() => {
-    // These global variables are provided by the Canvas environment.
-    const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
-    const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
-
-    if (Object.keys(firebaseConfig).length > 0) {
-      const app = initializeApp(firebaseConfig);
-      const authInstance = getAuth(app);
-      const dbInstance = getFirestore(app);
-      setAuth(authInstance);
-      setDb(dbInstance);
-
-      const unsubscribe = onAuthStateChanged(authInstance, async (authUser) => {
-        if (authUser) {
-          setUser(authUser);
-          // Fetch or create user profile
-          const userDocRef = doc(dbInstance, 'users', authUser.uid);
-          onSnapshot(userDocRef, (docSnap) => {
-            if (docSnap.exists()) {
-              setProfile(docSnap.data());
-            } else {
-              // Create a default profile if it doesn't exist
-              setDoc(userDocRef, {
-                uid: authUser.uid,
-                phoneNumber: authUser.phoneNumber || 'N/A',
-                displayName: `User-${authUser.uid.substring(0, 5)}`,
-                photoURL: 'https://placehold.co/100x100/A0A0A0/FFFFFF?text=P',
-                online: true,
-              });
-            }
-          });
-          setLoginState('verified');
-        } else {
-          setUser(null);
-          setLoginState('phone');
-          // If no token, sign in anonymously for a quick start.
-          if (!initialAuthToken) {
-            await signInAnonymously(authInstance);
-          }
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WhatsApp-style Messenger</title>
+    <!-- Tailwind CSS CDN for styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
         }
-        setIsAuthReady(true);
-      });
+        .chat-bubble-sent {
+            border-bottom-right-radius: 0;
+        }
+        .chat-bubble-received {
+            border-bottom-left-radius: 0;
+        }
+    </style>
+</head>
+<body class="bg-gray-100 min-h-screen flex flex-col font-inter text-gray-800">
 
-      // Use the provided custom auth token to sign in the user.
-      if (initialAuthToken) {
-        signInWithCustomToken(authInstance, initialAuthToken).catch(console.error);
-      }
-
-      return () => unsubscribe();
-    }
-  }, []);
-
-  // Set up real-time contacts listener.
-  useEffect(() => {
-    if (db && user) {
-      const usersCollectionRef = collection(db, 'users');
-      const unsubscribe = onSnapshot(usersCollectionRef, (snapshot) => {
-        const usersList = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }))
-          .filter(u => u.id !== user.uid); // Exclude the current user
-        setContacts(usersList);
-      });
-
-      return () => unsubscribe();
-    }
-  }, [db, user]);
-
-  // Set up real-time messages listener for the current chat.
-  useEffect(() => {
-    if (db && currentChat) {
-      const chatId = [user.uid, currentChat.id].sort().join('_');
-      const messagesCollectionRef = collection(db, 'chats', chatId, 'messages');
-      // Firebase `orderBy` requires an index, which is not guaranteed to exist.
-      // So we fetch all messages and sort them client-side to avoid errors.
-      const q = query(messagesCollectionRef);
-      const unsubscribe = onSnapshot(q, (snapshot) => {
-        const msgs = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-        // Sort messages by timestamp after fetching
-        msgs.sort((a, b) => a.timestamp?.toMillis() - b.timestamp?.toMillis());
-        setMessages(msgs);
-      });
-
-      return () => unsubscribe();
-    }
-  }, [db, currentChat, user]);
-
-  // Scroll to the bottom of the chat when new messages arrive.
-  useEffect(() => {
-    if (messagesEndRef.current) {
-      messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
-    }
-  }, [messages]);
-
-  // Handle sending a text message.
-  const handleSendMessage = async (e) => {
-    e.preventDefault();
-    if (!messageText.trim()) return;
-
-    const chatId = [user.uid, currentChat.id].sort().join('_');
-    const messagesCollectionRef = collection(db, 'chats', chatId, 'messages');
-
-    try {
-      await addDoc(messagesCollectionRef, {
-        senderId: user.uid,
-        recipientId: currentChat.id,
-        text: messageText,
-        timestamp: serverTimestamp(),
-      });
-      setMessageText('');
-    } catch (error) {
-      console.error("Error sending message:", error);
-    }
-  };
-
-  // Handle profile update.
-  const handleProfileUpdate = async () => {
-    if (db && user) {
-      const userDocRef = doc(db, 'users', user.uid);
-      await setDoc(userDocRef, {
-        displayName: profile.displayName,
-        photoURL: profile.photoURL,
-      }, { merge: true });
-      setIsEditingProfile(false);
-    }
-  };
-
-  // Simple logout function.
-  const handleLogout = async () => {
-    if (auth) {
-      await signOut(auth);
-      setCurrentChat(null);
-    }
-  };
-
-  // Render different views based on the app state.
-  if (!isAuthReady) {
-    return <div className="flex justify-center items-center h-screen bg-gray-100 font-inter text-gray-800 p-4">
-      <div className="text-center text-lg font-bold">Loading...</div>
-    </div>;
-  }
-
-  // Login/Signup screen with a mocked OTP flow.
-  if (!user) {
-    const handleLoginClick = () => setLoginState('otp');
-    const handleVerifyClick = () => {
-      // In a real app, this would verify the OTP via a Firebase function.
-      // For this demo, we assume the token has already authenticated the user.
-      setLoginState('verified');
-    };
-
-    return (
-      <div className="flex flex-col items-center justify-center min-h-screen bg-gray-100 p-4 font-inter text-gray-800">
-        <div className="bg-white rounded-xl shadow-lg p-8 w-full max-w-sm">
-          <h1 className="text-3xl font-bold text-center text-teal-600 mb-6">Messenger</h1>
-          {loginState === 'phone' && (
-            <>
-              <p className="text-center mb-4 text-sm">Enter your phone number to sign up or log in.</p>
-              <input type="tel" placeholder="Phone Number" className="w-full p-3 mb-4 rounded-lg border-2 border-gray-300 focus:outline-none focus:border-teal-500" />
-              <button onClick={handleLoginClick} className="w-full bg-teal-600 text-white p-3 rounded-lg font-bold hover:bg-teal-700 transition-colors">Get OTP</button>
-            </>
-          )}
-          {loginState === 'otp' && (
-            <>
-              <p className="text-center mb-4 text-sm">Enter the OTP sent to your phone.</p>
-              <input type="text" placeholder="OTP" className="w-full p-3 mb-4 rounded-lg border-2 border-gray-300 focus:outline-none focus:border-teal-500" />
-              <button onClick={handleVerifyClick} className="w-full bg-teal-600 text-white p-3 rounded-lg font-bold hover:bg-teal-700 transition-colors">Verify</button>
-            </>
-          )}
-        </div>
-      </div>
-    );
-  }
-
-  // Main application view (Contacts, Chat, Profile)
-  return (
-    <div className="min-h-screen bg-gray-100 flex flex-col font-inter text-gray-800">
-
-      {/* Profile Edit Modal */}
-      {isEditingProfile && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-          <div className="bg-white rounded-xl shadow-2xl p-6 w-full max-w-sm">
-            <h2 className="text-2xl font-bold mb-4 text-center">Edit Profile</h2>
-            <div className="flex flex-col items-center space-y-4">
-              <input
-                type="text"
-                placeholder="Display Name"
-                value={profile.displayName}
-                onChange={(e) => setProfile({ ...profile, displayName: e.target.value })}
-                className="w-full p-3 rounded-lg border-2 border-gray-300 focus:outline-none focus:border-teal-500"
-              />
-              <input
-                type="text"
-                placeholder="Photo URL"
-                value={profile.photoURL}
-                onChange={(e) => setProfile({ ...profile, photoURL: e.target.value })}
-                className="w-full p-3 rounded-lg border-2 border-gray-300 focus:outline-none focus:border-teal-500"
-              />
-              <button onClick={handleProfileUpdate} className="w-full bg-teal-600 text-white p-3 rounded-lg font-bold hover:bg-teal-700 transition-colors">Save Profile</button>
-              <button onClick={() => setIsEditingProfile(false)} className="w-full bg-gray-200 text-gray-800 p-3 rounded-lg font-bold hover:bg-gray-300 transition-colors">Cancel</button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Main UI */}
-      <div className="flex-1 flex flex-col overflow-hidden">
-        {/* Header */}
-        <header className="bg-white shadow-md p-4 flex items-center justify-between z-10 sticky top-0">
-          {currentChat ? (
-            <button onClick={() => setCurrentChat(null)} className="flex items-center text-teal-600 hover:text-teal-700">
-              <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-              </svg>
-              <span className="text-lg font-bold ml-2">{currentChat.displayName}</span>
-            </button>
-          ) : (
-            <h1 className="text-2xl font-bold text-teal-600">Messenger</h1>
-          )}
-          <div className="flex items-center space-x-4">
-            <button onClick={() => setIsEditingProfile(true)} className="p-2 rounded-full hover:bg-gray-200 transition-colors">
-              <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 text-gray-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.525.322 1.011.536 1.011 1.066z" />
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-              </svg>
-            </button>
-            <button onClick={handleLogout} className="p-2 rounded-full hover:bg-gray-200 transition-colors">
-              <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 text-gray-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
-              </svg>
-            </button>
-          </div>
-        </header>
-
-        {/* Contacts List */}
-        {!currentChat && (
-          <main className="flex-1 overflow-y-auto bg-gray-200 p-2">
-            <div className="bg-white rounded-xl shadow-lg p-4 mb-4">
-              <h2 className="text-xl font-bold mb-2">My Profile</h2>
-              <div className="flex items-center space-x-4">
-                <img src={profile.photoURL} alt="Profile" className="w-12 h-12 rounded-full object-cover" />
-                <div>
-                  <h3 className="text-lg font-semibold">{profile.displayName}</h3>
-                  <p className="text-sm text-gray-500">{user.phoneNumber}</p>
-                  <p className="text-xs text-gray-400">User ID: {user.uid}</p>
-                </div>
-              </div>
-            </div>
-            <h2 className="text-xl font-bold mb-2 text-gray-600">Chats</h2>
-            <div className="space-y-2">
-              {contacts.map(contact => (
-                <div key={contact.id} onClick={() => setCurrentChat(contact)} className="bg-white rounded-xl shadow-md p-4 flex items-center space-x-4 cursor-pointer hover:bg-gray-50 transition-colors">
-                  <div className="relative">
-                    <img src={contact.photoURL} alt="Profile" className="w-12 h-12 rounded-full object-cover" />
-                    <span className={`absolute bottom-0 right-0 h-3 w-3 rounded-full border-2 border-white ${contact.online ? 'bg-green-500' : 'bg-gray-400'}`}></span>
-                  </div>
-                  <div className="flex-1">
-                    <h3 className="text-lg font-semibold">{contact.displayName}</h3>
-                    <p className="text-sm text-gray-500 truncate">Tap to start chatting...</p>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </main>
-        )}
-
-        {/* Chat View */}
-        {currentChat && (
-          <div className="flex-1 flex flex-col">
-            <main className="flex-1 overflow-y-auto p-4 bg-gray-100">
-              <div className="space-y-4">
-                {messages.map((msg, index) => (
-                  <div key={index} className={`flex ${msg.senderId === user.uid ? 'justify-end' : 'justify-start'}`}>
-                    <div className={`p-3 rounded-xl max-w-xs md:max-w-md break-words ${msg.senderId === user.uid ? 'bg-teal-500 text-white rounded-br-none' : 'bg-white text-gray-800 rounded-bl-none shadow'}`}>
-                      {msg.text && <p className="mb-1 text-sm">{msg.text}</p>}
-                      <p className="text-xs text-right opacity-70">
-                        {msg.timestamp ? new Date(msg.timestamp.toDate()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '...'}
-                      </p>
-                    </div>
-                  </div>
-                ))}
-              </div>
-              <div ref={messagesEndRef}></div>
-            </main>
-
-            {/* Message Input */}
-            <form onSubmit={handleSendMessage} className="bg-white p-4 shadow-top sticky bottom-0">
-              <div className="flex items-center space-x-2">
-                <input
-                  type="text"
-                  value={messageText}
-                  onChange={(e) => setMessageText(e.target.value)}
-                  placeholder="Type a message..."
-                  className="flex-1 p-3 rounded-full bg-gray-200 focus:outline-none focus:bg-white focus:ring-2 focus:ring-teal-500"
-                />
-                <button type="submit" className="p-3 bg-teal-600 rounded-full text-white hover:bg-teal-700 transition-colors">
-                  <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                    <path d="M14 5l7 7m0 0l-7 7m7-7H3" />
-                  </svg>
-                </button>
-              </div>
-            </form>
-          </div>
-        )}
-      </div>
+    <!-- Main Container -->
+    <div id="app-container" class="flex-1 flex flex-col overflow-hidden">
+        <!-- Views will be dynamically inserted here -->
     </div>
-  );
-};
 
-export default App;
+    <!-- Firebase SDKs -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInWithCustomToken, onAuthStateChanged, signOut, signInAnonymously } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, onSnapshot, doc, setDoc, addDoc, serverTimestamp, query, getDocs } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
+        // Firebase-related global variables
+        let app, auth, db;
+        let currentUser = null;
+        let currentChatUser = null;
+        let isAuthReady = false;
 
-              
+        // UI elements
+        const appContainer = document.getElementById('app-container');
+
+        // --- Firebase Initialization and Authentication ---
+        const initializeFirebase = async () => {
+            try {
+                const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+                const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+                if (Object.keys(firebaseConfig).length === 0) {
+                    console.error("Firebase config is missing.");
+                    return;
+                }
+
+                app = initializeApp(firebaseConfig);
+                auth = getAuth(app);
+                db = getFirestore(app);
+
+                onAuthStateChanged(auth, async (user) => {
+                    currentUser = user;
+                    if (user) {
+                        // User is signed in, fetch or create their profile
+                        const userDocRef = doc(db, 'users', user.uid);
+                        onSnapshot(userDocRef, (docSnap) => {
+                            if (!docSnap.exists()) {
+                                // Create a default profile if it doesn't exist
+                                setDoc(userDocRef, {
+                                    uid: user.uid,
+                                    displayName: `User-${user.uid.substring(0, 5)}`,
+                                    photoURL: `https://placehold.co/100x100/A0A0A0/FFFFFF?text=${user.uid.substring(0, 1)}`,
+                                    online: true,
+                                    lastSeen: new Date(),
+                                });
+                            }
+                        });
+                        renderMainView();
+                    } else {
+                        // User is signed out, render login view
+                        renderLoginView();
+                    }
+                    isAuthReady = true;
+                });
+
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken).catch(console.error);
+                } else {
+                    await signInAnonymously(auth);
+                }
+            } catch (error) {
+                console.error("Error initializing Firebase:", error);
+                renderErrorView("Failed to load Firebase.");
+            }
+        };
+
+        // --- Rendering Functions ---
+        const renderErrorView = (message) => {
+            appContainer.innerHTML = `
+                <div class="flex flex-col items-center justify-center min-h-screen bg-gray-100 p-4">
+                    <div class="bg-white rounded-xl shadow-lg p-8 w-full max-w-sm text-center">
+                        <h1 class="text-2xl font-bold text-red-600 mb-4">Error</h1>
+                        <p class="text-gray-600">${message}</p>
+                    </div>
+                </div>
+            `;
+        };
+        
+        const renderLoadingView = () => {
+            appContainer.innerHTML = `
+                <div class="flex justify-center items-center h-screen bg-gray-100">
+                    <div class="text-center text-lg font-bold">Loading...</div>
+                </div>
+            `;
+        };
+
+        const renderLoginView = () => {
+            // Mock login view, as the app is auto-authenticated
+            appContainer.innerHTML = `
+                <div class="flex flex-col items-center justify-center min-h-screen bg-gray-100 p-4">
+                    <div class="bg-white rounded-xl shadow-lg p-8 w-full max-w-sm text-center">
+                        <h1 class="text-3xl font-bold text-teal-600 mb-6">Messenger</h1>
+                        <p class="text-center mb-4 text-sm">Signing in automatically. Please wait...</p>
+                    </div>
+                </div>
+            `;
+        };
+
+        const renderMainView = async () => {
+            appContainer.innerHTML = `
+                <header class="bg-white shadow-md p-4 flex items-center justify-between z-10 sticky top-0">
+                    <h1 class="text-2xl font-bold text-teal-600">Messenger</h1>
+                    <div class="flex items-center space-x-4">
+                        <button id="edit-profile-btn" class="p-2 rounded-full hover:bg-gray-200 transition-colors">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-gray-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.525.322 1.011.536 1.011 1.066z" />
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                            </svg>
+                        </button>
+                        <button id="logout-btn" class="p-2 rounded-full hover:bg-gray-200 transition-colors">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-gray-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+                            </svg>
+                        </button>
+                    </div>
+                </header>
+                <main id="main-content" class="flex-1 flex flex-col overflow-y-auto p-4"></main>
+                <div id="modal-container"></div>
+            `;
+            document.getElementById('edit-profile-btn').addEventListener('click', renderProfileEditModal);
+            document.getElementById('logout-btn').addEventListener('click', () => signOut(auth));
+
+            renderContactsView();
+        };
+
+        const renderContactsView = async () => {
+            const mainContent = document.getElementById('main-content');
+            mainContent.innerHTML = `
+                <div id="my-profile-card" class="bg-white rounded-xl shadow-lg p-4 mb-4">
+                    <h2 class="text-xl font-bold mb-2">My Profile</h2>
+                    <div class="flex items-center space-x-4" id="current-user-profile">
+                        <!-- Profile content will be dynamically added -->
+                    </div>
+                </div>
+                <h2 class="text-xl font-bold mb-2 text-gray-600">Chats</h2>
+                <div id="contacts-list" class="space-y-2">
+                    <!-- Contacts will be dynamically added -->
+                </div>
+            `;
+
+            // Listen for changes to all users
+            onSnapshot(collection(db, 'users'), (snapshot) => {
+                const contactsListEl = document.getElementById('contacts-list');
+                const currentUserProfileEl = document.getElementById('current-user-profile');
+                if (!contactsListEl || !currentUserProfileEl) return;
+
+                let contacts = [];
+                let userProfile = null;
+                snapshot.docs.forEach(docSnap => {
+                    const data = { id: docSnap.id, ...docSnap.data() };
+                    if (data.id === currentUser.uid) {
+                        userProfile = data;
+                    } else {
+                        contacts.push(data);
+                    }
+                });
+
+                // Render current user profile
+                if (userProfile) {
+                    currentUserProfileEl.innerHTML = `
+                        <img src="${userProfile.photoURL}" alt="Profile" class="w-12 h-12 rounded-full object-cover" onerror="this.onerror=null; this.src='https://placehold.co/100x100/A0A0A0/FFFFFF?text=P';" />
+                        <div>
+                            <h3 class="text-lg font-semibold">${userProfile.displayName}</h3>
+                            <p class="text-xs text-gray-400">User ID: ${currentUser.uid.substring(0, 10)}...</p>
+                        </div>
+                    `;
+                }
+
+                // Render contacts list
+                contactsListEl.innerHTML = '';
+                contacts.forEach(contact => {
+                    const contactItem = document.createElement('div');
+                    contactItem.className = "bg-white rounded-xl shadow-md p-4 flex items-center space-x-4 cursor-pointer hover:bg-gray-50 transition-colors";
+                    contactItem.innerHTML = `
+                        <div class="relative">
+                            <img src="${contact.photoURL}" alt="Profile" class="w-12 h-12 rounded-full object-cover" onerror="this.onerror=null; this.src='https://placehold.co/100x100/A0A0A0/FFFFFF?text=P';" />
+                            <span class="absolute bottom-0 right-0 h-3 w-3 rounded-full border-2 border-white ${contact.online ? 'bg-green-500' : 'bg-gray-400'}"></span>
+                        </div>
+                        <div class="flex-1">
+                            <h3 class="text-lg font-semibold">${contact.displayName}</h3>
+                            <p class="text-sm text-gray-500 truncate">Tap to start chatting...</p>
+                        </div>
+                    `;
+                    contactItem.addEventListener('click', () => {
+                        currentChatUser = contact;
+                        renderChatView();
+                    });
+                    contactsListEl.appendChild(contactItem);
+                });
+            });
+        };
+
+        const renderChatView = () => {
+            const chatId = [currentUser.uid, currentChatUser.id].sort().join('_');
+            const messagesCollectionRef = collection(db, 'chats', chatId, 'messages');
+
+            const mainContent = document.getElementById('main-content');
+            mainContent.innerHTML = `
+                <header class="bg-white shadow-md p-4 flex items-center justify-start z-10 sticky top-0 md:hidden">
+                    <button id="back-to-contacts-btn" class="p-2 rounded-full hover:bg-gray-200 transition-colors text-teal-600">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7" />
+                        </svg>
+                    </button>
+                    <span class="text-lg font-bold ml-2">${currentChatUser.displayName}</span>
+                </header>
+                <div id="messages-list" class="flex-1 overflow-y-auto p-4 bg-gray-100 flex flex-col space-y-4">
+                    <!-- Messages will be dynamically added here -->
+                    <div id="messages-end-ref"></div>
+                </div>
+                <form id="message-form" class="bg-white p-4 shadow-top sticky bottom-0">
+                    <div class="flex items-center space-x-2">
+                        <input type="text" id="message-input" placeholder="Type a message..." class="flex-1 p-3 rounded-full bg-gray-200 focus:outline-none focus:bg-white focus:ring-2 focus:ring-teal-500" />
+                        <button type="submit" class="p-3 bg-teal-600 rounded-full text-white hover:bg-teal-700 transition-colors">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                                <path d="M14 5l7 7m0 0l-7 7m7-7H3" />
+                            </svg>
+                        </button>
+                    </div>
+                </form>
+            `;
+
+            document.getElementById('back-to-contacts-btn').addEventListener('click', () => {
+                currentChatUser = null;
+                renderContactsView();
+            });
+
+            const messageForm = document.getElementById('message-form');
+            messageForm.addEventListener('submit', handleSendMessage);
+
+            // Listen for real-time messages
+            onSnapshot(messagesCollectionRef, (snapshot) => {
+                const messagesListEl = document.getElementById('messages-list');
+                const messagesEndRef = document.getElementById('messages-end-ref');
+                if (!messagesListEl || !messagesEndRef) return;
+
+                const msgs = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                // Sort messages by timestamp, as Firestore orderBy() requires an index
+                msgs.sort((a, b) => (a.timestamp ? a.timestamp.toMillis() : 0) - (b.timestamp ? b.timestamp.toMillis() : 0));
+
+                messagesListEl.innerHTML = '';
+                msgs.forEach(msg => {
+                    const isSender = msg.senderId === currentUser.uid;
+                    const messageEl = document.createElement('div');
+                    messageEl.className = `flex ${isSender ? 'justify-end' : 'justify-start'}`;
+                    messageEl.innerHTML = `
+                        <div class="p-3 rounded-xl max-w-xs md:max-w-md break-words ${isSender ? 'bg-teal-500 text-white chat-bubble-sent' : 'bg-white text-gray-800 chat-bubble-received shadow'}">
+                            <p class="mb-1 text-sm">${msg.text}</p>
+                            <p class="text-xs text-right opacity-70">
+                                ${msg.timestamp ? new Date(msg.timestamp.toDate()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '...'}
+                            </p>
+                        </div>
+                    `;
+                    messagesListEl.appendChild(messageEl);
+                });
+                messagesEndRef.scrollIntoView({ behavior: 'smooth' });
+            });
+        };
+
+        const renderProfileEditModal = () => {
+            const modalContainer = document.getElementById('modal-container');
+            if (!modalContainer) return;
+            modalContainer.innerHTML = `
+                <div class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+                    <div class="bg-white rounded-xl shadow-2xl p-6 w-full max-w-sm">
+                        <h2 class="text-2xl font-bold mb-4 text-center">Edit Profile</h2>
+                        <div class="flex flex-col items-center space-y-4">
+                            <input type="text" id="profile-name-input" placeholder="Display Name" class="w-full p-3 rounded-lg border-2 border-gray-300 focus:outline-none focus:border-teal-500" />
+                            <input type="text" id="profile-photo-input" placeholder="Photo URL" class="w-full p-3 rounded-lg border-2 border-gray-300 focus:outline-none focus:border-teal-500" />
+                            <button id="save-profile-btn" class="w-full bg-teal-600 text-white p-3 rounded-lg font-bold hover:bg-teal-700 transition-colors">Save Profile</button>
+                            <button id="cancel-profile-btn" class="w-full bg-gray-200 text-gray-800 p-3 rounded-lg font-bold hover:bg-gray-300 transition-colors">Cancel</button>
+                        </div>
+                    </div>
+                </div>
+            `;
+            
+            // Get current profile data to pre-fill inputs
+            const userDocRef = doc(db, 'users', currentUser.uid);
+            getDocs(userDocRef).then(docSnap => {
+                const data = docSnap.data();
+                if (data) {
+                    document.getElementById('profile-name-input').value = data.displayName;
+                    document.getElementById('profile-photo-input').value = data.photoURL;
+                }
+            });
+
+            document.getElementById('save-profile-btn').addEventListener('click', handleProfileUpdate);
+            document.getElementById('cancel-profile-btn').addEventListener('click', () => {
+                modalContainer.innerHTML = '';
+            });
+        };
+
+        // --- Event Handlers ---
+        const handleSendMessage = async (e) => {
+            e.preventDefault();
+            const messageInput = document.getElementById('message-input');
+            const messageText = messageInput.value.trim();
+
+            if (!messageText) return;
+
+            const chatId = [currentUser.uid, currentChatUser.id].sort().join('_');
+            const messagesCollectionRef = collection(db, 'chats', chatId, 'messages');
+
+            try {
+                await addDoc(messagesCollectionRef, {
+                    senderId: currentUser.uid,
+                    recipientId: currentChatUser.id,
+                    text: messageText,
+                    timestamp: serverTimestamp(),
+                });
+                messageInput.value = '';
+            } catch (error) {
+                console.error("Error sending message:", error);
+            }
+        };
+
+        const handleProfileUpdate = async () => {
+            const newName = document.getElementById('profile-name-input').value;
+            const newPhotoURL = document.getElementById('profile-photo-input').value;
+
+            const userDocRef = doc(db, 'users', currentUser.uid);
+            await setDoc(userDocRef, {
+                displayName: newName,
+                photoURL: newPhotoURL,
+            }, { merge: true });
+
+            document.getElementById('modal-container').innerHTML = '';
+        };
+
+        // Start the application
+        document.addEventListener('DOMContentLoaded', () => {
+            renderLoadingView();
+            initializeFirebase();
+        });
+
+    </script>
+</body>
+</html>
+
